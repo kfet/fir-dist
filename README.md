@@ -9,7 +9,7 @@ This repository hosts **binaries only**. The source lives at
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kfet/fir/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/kfet/fir-dist/main/install.sh | sh
 ```
 
 ## Releases
