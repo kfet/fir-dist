@@ -37,8 +37,8 @@ detect_platform() {
     case "$ARCH" in
         x86_64|amd64)       ARCH="amd64" ;;
         arm64|aarch64)      ARCH="arm64" ;;
-        armv6l)             ARCH="arm6"  ;;
-        armv7l)             ARCH="arm6"  ;; # ARMv6 binary runs on ARMv7
+        armv6l)             ARCH="armv6"  ;;
+        armv7l)             ARCH="armv6"  ;; # ARMv6 binary runs on ARMv7
         *)
             echo "Error: unsupported architecture: $ARCH" >&2
             echo "  Build from source: go install github.com/$REPO/cmd/fir@latest" >&2
