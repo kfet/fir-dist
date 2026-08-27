@@ -16,6 +16,22 @@ set -e
 REPO="kfet/fir-dist"
 BINARY="fir"
 
+# Scratch state, removed by the cleanup trap below: TMP is the downloaded
+# binary, PROBE_DIR holds the duplicate-install scan's per-candidate results.
+TMP=""
+PROBE_DIR=""
+
+cleanup() {
+    [ -n "$TMP" ] && rm -f "$TMP"
+    [ -n "$PROBE_DIR" ] && rm -rf "$PROBE_DIR"
+    return 0
+}
+
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+
 # --------------------------------------------------------------------------
 # Detect platform
 # --------------------------------------------------------------------------
@@ -102,7 +118,6 @@ resolve_install_dir() {
 download() {
     DEST="$INSTALL_DIR/$BINARY"
     TMP=$(mktemp "${TMPDIR:-/tmp}/fir-install.XXXXXX")
-    trap 'rm -f "$TMP"' EXIT
 
     echo "Installing fir $TAG ($PLATFORM) to $INSTALL_DIR..."
 
@@ -130,6 +145,7 @@ install_binary() {
         echo "Need sudo to write to $INSTALL_DIR"
         sudo mv "$TMP" "$DEST"
     fi
+    TMP=""
 
     echo "Successfully installed fir $TAG to $DEST"
     install_completions
@@ -146,6 +162,117 @@ install_binary() {
             echo "Add it:  export PATH=\"$INSTALL_DIR:\$PATH\""
             ;;
     esac
+}
+
+# --------------------------------------------------------------------------
+# Warn about other fir installs
+# --------------------------------------------------------------------------
+#
+# Several fir binaries on one machine diverge silently: PATH order decides
+# which one runs, and `fir update` only ever rewrites the copy it was
+# launched from. Scan every PATH entry plus the well-known install
+# locations, collapse symlinks so one file reached two ways is not counted
+# twice, and report when more than one distinct binary exists.
+#
+# This is advisory only: no network, and it never changes the exit status.
+
+# Best-effort symlink resolution; falls back to the path as given.
+resolve_link() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1" 2>/dev/null || echo "$1"
+    elif command -v readlink >/dev/null 2>&1 && readlink -f "$1" >/dev/null 2>&1; then
+        readlink -f "$1"
+    else
+        echo "$1"
+    fi
+}
+
+check_duplicate_installs() {
+    # Directories to look in: everything on PATH, plus the spots we know
+    # about even when they are not on PATH.
+    dirs=$(printf '%s' "$PATH" | tr ':' '\n')
+    dirs="$dirs
+/usr/local/bin
+$HOME/.local/bin
+$HOME/go/bin
+$HOME/bin
+$INSTALL_DIR"
+
+    # Ask brew where it lives rather than guessing /usr/local vs /opt/homebrew.
+    if command -v brew >/dev/null 2>&1; then
+        brew_prefix=$(brew --prefix 2>/dev/null || true)
+        if [ -n "$brew_prefix" ]; then
+            dirs="$dirs
+$brew_prefix/bin"
+        fi
+    fi
+
+    # What PATH actually resolves right now.
+    active=$(command -v "$BINARY" 2>/dev/null || true)
+    [ -n "$active" ] && active=$(resolve_link "$active")
+
+    PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fir-probe.XXXXXX") || return 0
+
+    seen=""
+    count=0
+
+    old_ifs=$IFS
+    IFS='
+'
+    for dir in $dirs; do
+        [ -n "$dir" ] || continue
+        candidate="$dir/$BINARY"
+        [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+
+        real=$(resolve_link "$candidate")
+        case "
+$seen" in
+            *"
+$real
+"*) continue ;;
+        esac
+        seen="$seen$real
+"
+
+        count=$((count + 1))
+        printf '%s\n' "$real" > "$PROBE_DIR/p.$count"
+
+        # Probe versions concurrently, one background job per binary, so N
+        # candidates cost one probe's wall time instead of N. FIR_NO_UPDATE_CHECK
+        # keeps each probe local: fir >= 1.3 skips its release check, so nothing
+        # here touches the network. Older binaries ignore it and may pause
+        # briefly, but they all pause at the same time.
+        (FIR_NO_UPDATE_CHECK=1 "$real" --version 2>/dev/null | head -1 > "$PROBE_DIR/v.$count") &
+    done
+    IFS=$old_ifs
+
+    wait
+
+    [ "$count" -gt 1 ] || return 0
+
+    echo ""
+    echo "Warning: $count fir binaries found on this system:"
+
+    i=1
+    while [ "$i" -le "$count" ]; do
+        real=$(cat "$PROBE_DIR/p.$i")
+        ver=$(cat "$PROBE_DIR/v.$i" 2>/dev/null)
+        [ -n "$ver" ] || ver="unknown version"
+
+        if [ "$real" = "$active" ]; then
+            mark="<- PATH resolves this one"
+        else
+            mark="(shadowed)"
+        fi
+
+        echo "  $real  [$ver]  $mark"
+        i=$((i + 1))
+    done
+
+    echo ""
+    echo "Only the one PATH resolves is used, and 'fir update' only updates that"
+    echo "copy — the others keep their old versions. Remove the extras (or put the"
+    echo "directory you want first on PATH) to avoid running a stale fir."
 }
 
 # Install bash + zsh completion to per-user directories. We never sudo here —
@@ -190,3 +317,4 @@ detect_platform
 resolve_version
 resolve_install_dir
 download
+check_duplicate_installs || true
